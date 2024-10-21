@@ -103,7 +103,7 @@ private:
     CRITICAL_SECTION send_cs_;                // 송신 동기화를 위한 크리티컬 섹션
     CRITICAL_SECTION recv_cs_;                // 수신 동기화를 위한 크리티컬 섹션
 
-    struct AcceptOverlapped
+    struct AcceptOverlapped                   // 비동기 Accept를 위한 Overlapped
     {
         OVERLAPPED overlapped;
         SOCKET accept_socket;
@@ -114,7 +114,7 @@ public:
     ~IocpServer();
     bool Initialize();
     void StartProcess();
-    void EnqueueJob(const Job job);
+    
 
     DWORD active_sessions_;                   // 활성 세션 수
     
@@ -122,6 +122,7 @@ public:
 private:
     static unsigned __stdcall WorkerThread(void* arg);
     void ProcessReceivedData(User* user, DWORD bytes_transferred);
+    void EnqueueJob(const Job job);
     void PostAccept(); 
     void PostRecv(User* user);
     void PostSend(User* user);
@@ -168,6 +169,6 @@ private:
 
     static unsigned __stdcall FrameThread(void* arg);
     
-    void ProcessDeleteLists();
     int GetRandomNumber(int min, int max);
+    void CloseSocket(SOCKET socket);
 };

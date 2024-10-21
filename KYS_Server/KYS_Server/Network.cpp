@@ -111,6 +111,13 @@ bool IocpServer::Initialize()
         return false;
     }
 
+    if (CreateIoCompletionPort((HANDLE)listen_socket_, h_iocp_, 0, 0) == NULL)
+    {
+        printf("CreateIoCompletionPort failed for listen socket - Error Code : %d\n", GetLastError());
+        closesocket(listen_socket_);
+        return false;
+    }
+
     // 프레임 동기화 이벤트 생성
     frame_start_event_ = CreateEvent(NULL, TRUE, FALSE, NULL);
     frame_end_event_ = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -186,7 +193,7 @@ unsigned __stdcall IocpServer::WorkerThread(void* arg)
         {
             if (p_overlapped == NULL)
             {
-                // 실제 오류 상황일 때만 오류 메시지 출력
+                // 에러 처리
                 DWORD error = GetLastError();
                 if (error != WAIT_TIMEOUT)
                 {
@@ -207,7 +214,7 @@ unsigned __stdcall IocpServer::WorkerThread(void* arg)
         }
 
         // Accept 완료 처리
-        if (completion_key == 0 && p_overlapped != NULL)
+        if (completion_key == 0)
         {
             server->ProcessAccept(p_overlapped);
             continue;
@@ -228,7 +235,7 @@ unsigned __stdcall IocpServer::WorkerThread(void* arg)
         else if (p_overlapped == &user->send_overlapped)
         {
             EnterCriticalSection(&server->send_cs_);
-            user->p_send_buffer->MoveFront(bytes_transferred);
+            user->p_send_buffer->MoveRear(bytes_transferred);
             if (user->p_send_buffer->GetUseSize() > 0)
             {
                 server->PostSend(user);
@@ -359,11 +366,13 @@ void IocpServer::PostRecv(User* user)
 
 void IocpServer::PostSend(User* user)
 {
+    // 이미 전송 중인 경우 중복 전송 방지
     if (user->is_sending)
         return;
 
     EnterCriticalSection(&send_cs_);
 
+    // 전송할 데이터 크기 확인
     int send_size = user->p_send_buffer->GetUseSize();
     if (send_size == 0)
     {
@@ -371,20 +380,31 @@ void IocpServer::PostSend(User* user)
         return;
     }
 
+    // 전송 상태 설정
     user->is_sending = true;
+
+    // WSABUF 구조체 설정
     WSABUF wsabuf;
     wsabuf.len = send_size;
-    wsabuf.buf = user->p_send_buffer->GetFrontBufferPtr();
+    wsabuf.buf = user->p_send_buffer->GetRearBufferPtr(); 
 
+    // WSASend 호출
     DWORD bytes_sent = 0;
     int result = WSASend(user->socket, &wsabuf, 1, &bytes_sent, 0, &user->send_overlapped, NULL);
 
     if (result == SOCKET_ERROR && WSAGetLastError() != ERROR_IO_PENDING)
     {
-        printf("WSASend failed - Error Code : %d\n", WSAGetLastError());
+        // 전송 실패 처리
         user->is_sending = false;
-        DeleteUser(user->session_id); 
+        LeaveCriticalSection(&send_cs_);
+
+        // 사용자 연결 종료
+        DeleteUser(user->session_id);
+        return;
     }
+
+    // 주의: 실제 전송된 바이트 수는 WSASend 완료 후 IOCP 완료 루틴에서 확인해야 함
+    // 여기서는 버퍼를 비우지 않고, IOCP 완료 루틴에서 처리해야 함
 
     LeaveCriticalSection(&send_cs_);
 }
@@ -447,6 +467,7 @@ unsigned __stdcall IocpServer::AcceptThread(void* arg)
 
 void IocpServer::ProcessAccept(LPOVERLAPPED p_overlapped)
 {
+    printf("accept\n");
     pending_accepts_--;  // AcceptEx 완료 시 감소
 
     AcceptOverlapped* accept_overlapped = reinterpret_cast<AcceptOverlapped*>(p_overlapped);
@@ -610,7 +631,7 @@ void IocpServer::RemoveUser()
             {
                 User* userToDelete = *user_it; 
 
-                closesocket((*user_it)->socket);
+                CloseSocket(userToDelete->socket); // rst패킷 전송
 
                 delete (*user_it)->p_recv_buffer;
                 delete (*user_it)->p_send_buffer;
@@ -805,8 +826,8 @@ void IocpServer::ProcessUserMove()
             }
 
             // 맵 경계 체크 (맵 크기를 1000x1000으로 가정)
-            user->x = max(0, min(user->x, 1000));
-            user->y = max(0, min(user->y, 1000));
+            user->x = max(0, min(user->x, 150));
+            user->y = max(0, min(user->y, 70));
         }
     }
     LeaveCriticalSection(&user_list_cs_);
@@ -1123,8 +1144,8 @@ void IocpServer::UpdateMonsterPosition(Monster* monster)
         
 
         // 맵 경계 체크 (맵 크기를 1000x1000으로 가정)
-        monster->x = max(0, min(monster->x, 1000)); 
-        monster->y = max(0, min(monster->y, 1000));
+        monster->x = max(0, min(monster->x, 150)); 
+        monster->y = max(0, min(monster->y, 70));
         }
     }
     LeaveCriticalSection(&monster_list_cs_);
@@ -1298,6 +1319,14 @@ unsigned __stdcall IocpServer::FrameThread(void* arg)
     return 0;
 }
 
+void IocpServer::CloseSocket(SOCKET socket)
+{
+    linger so_linger;
+    so_linger.l_onoff = 1;
+    so_linger.l_linger = 0;
+    setsockopt(socket, SOL_SOCKET, SO_LINGER, (char*)&so_linger, sizeof(so_linger));
+    closesocket(socket);
+}
 
 
 
